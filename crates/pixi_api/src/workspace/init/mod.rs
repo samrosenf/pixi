@@ -302,14 +302,7 @@ async fn init_from_env_file<I: Interface>(
         .await;
 
     if format == ManifestFormat::Pyproject {
-        let pypi_safe_name = get_pypi_safe_name(&render_ctx.default_name);
-        let pkg_name = PackageName::from_str(&pypi_safe_name)
-            .map(|name| name.as_dist_info_name().to_string())
-            .unwrap_or_else(|_| pypi_safe_name.clone());
-
-        let dir = workspace.workspace.provenance.path.parent().unwrap();
-        let src_dir = dir.join("src").join(pkg_name);
-        create_pyproject_src_files(src_dir).await?;
+        create_pyproject_src_structure(workspace.root(), &render_ctx.default_name).await?;
     }
 
     Ok(workspace)
@@ -402,6 +395,12 @@ fn get_pypi_safe_name(name: &str) -> String {
     }
 }
 
+fn normalize_pypi_name(raw: &str) -> String {
+    PackageName::from_str(raw)
+        .map(|n| n.as_dist_info_name().to_string())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
 async fn create_new_manifest<I: Interface>(
     interface: &I,
     manifest_path: PathBuf,
@@ -427,20 +426,21 @@ async fn create_new_manifest<I: Interface>(
     save_manifest_file(interface, &manifest_path, rv).await?;
 
     if format == ManifestFormat::Pyproject {
-        let pypi_safe_name = get_pypi_safe_name(&render_ctx.default_name);
-        let pkg_name = PackageName::from_str(&pypi_safe_name)
-            .map(|name| name.as_dist_info_name().to_string())
-            .unwrap_or_else(|_| pypi_safe_name.clone());
-
-        let dir = manifest_path.parent().unwrap();
-        let src_dir = dir.join("src").join(pkg_name);
-        create_pyproject_src_files(src_dir).await?;
+        let workspace_root = manifest_path.parent().unwrap();
+        create_pyproject_src_structure(workspace_root, &render_ctx.default_name).await?;
     }
 
     Ok(Workspace::from_path(&manifest_path)?)
 }
 
-async fn create_pyproject_src_files(src_dir: PathBuf) -> miette::Result<()> {
+async fn create_pyproject_src_structure(
+    workspace_root: &Path,
+    raw_name: &str,
+) -> miette::Result<()> {
+    let pypi_safe_name = get_pypi_safe_name(raw_name);
+    let pkg_name = normalize_pypi_name(&pypi_safe_name);
+    let src_dir = workspace_root.join("src").join(pkg_name);
+
     tokio::fs::create_dir_all(&src_dir)
         .await
         .into_diagnostic()
@@ -481,18 +481,15 @@ fn render_workspace(
     env_vars: Option<&HashMap<String, String>>,
     pypi_mapping: Option<&HashMap<NamedChannelOrUrl, String>>,
 ) -> String {
-    // Calculate Python specific names internally *only* if needed
     let pypi_safe_name = if format == ManifestFormat::Pyproject {
         Some(get_pypi_safe_name(&name))
     } else {
         None
     };
 
-    let pypi_package_name = pypi_safe_name.as_ref().map(|safe_name| {
-        PackageName::from_str(safe_name)
-            .map(|n| n.as_dist_info_name().to_string())
-            .unwrap_or_else(|_| safe_name.clone())
-    });
+    let pypi_package_name = pypi_safe_name
+        .as_ref()
+        .map(|safe_name| normalize_pypi_name(safe_name));
 
     let ctx = context! {
         name => pypi_safe_name.unwrap_or(name),
@@ -714,6 +711,14 @@ mod tests {
         pub _tmp_dir: tempfile::TempDir,
     }
 
+    impl TestOutcome {
+        fn read_toml_manifest(&self, filename: &str) -> toml::Value {
+            let path = self.project_path.join(filename);
+            let content = fs_err::read_to_string(path).unwrap();
+            toml::from_str(&content).unwrap()
+        }
+    }
+
     // Create TestOutcome function
     async fn run_init_scenario(config: TestConfig) -> TestOutcome {
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -904,11 +909,7 @@ variables:
         assert!(outcome.result.is_ok());
         assert!(outcome.pixi_exists);
 
-        // check that the info from env is in the file
-        let pixi_path = outcome.project_path.join(consts::WORKSPACE_MANIFEST);
-        let content = fs_err::read_to_string(pixi_path).unwrap();
-
-        let toml_data: toml::Value = toml::from_str(&content).expect("Valid TOML output");
+        let toml_data = outcome.read_toml_manifest(consts::WORKSPACE_MANIFEST);
 
         assert_eq!(toml_data["workspace"]["name"].as_str(), Some("custom_env"));
         assert_eq!(
@@ -951,11 +952,7 @@ variables:
         assert!(outcome.result.is_ok());
         assert!(outcome.mojo_exists);
 
-        // check that the info from env is in the file
-        let mojo_path = outcome.project_path.join(consts::MOJOPROJECT_MANIFEST);
-        let content = fs_err::read_to_string(mojo_path).unwrap();
-
-        let toml_data: toml::Value = toml::from_str(&content).expect("Valid TOML output");
+        let toml_data = outcome.read_toml_manifest(consts::MOJOPROJECT_MANIFEST);
 
         assert_eq!(toml_data["workspace"]["name"].as_str(), Some("custom_env"));
         assert_eq!(
@@ -1003,11 +1000,7 @@ variables:
         assert!(outcome.result.is_ok());
         assert!(outcome.pyproject_exists);
 
-        // check that the info from env is in the file
-        let pyproject_path = outcome.project_path.join(consts::PYPROJECT_MANIFEST);
-        let content = fs_err::read_to_string(pyproject_path).unwrap();
-
-        let toml_data: toml::Value = toml::from_str(&content).expect("Valid TOML output");
+        let toml_data = outcome.read_toml_manifest(consts::PYPROJECT_MANIFEST);
 
         assert_eq!(toml_data["project"]["name"].as_str(), Some("custom_env"));
         assert_eq!(
