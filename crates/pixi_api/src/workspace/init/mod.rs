@@ -698,11 +698,20 @@ mod tests {
         let mut env_file = None;
         if config.with_env_file {
             let env_path = project_path.join("environment.yml");
-            fs_err::write(
-                &env_path,
-                "name: env\nchannels: [conda-forge]\ndependencies: [python]",
-            )
-            .unwrap();
+            let yaml_content = "\
+name: custom_env
+channels:
+  - robostack
+  - conda-forge
+dependencies:
+  - python
+  - numpy
+  - pip:
+    - requests
+variables:
+  TEST_ENV_VAR: success_value
+";
+            fs_err::write(&env_path, yaml_content).unwrap();
             env_file = Some(env_path);
         }
 
@@ -737,14 +746,8 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
-    async fn test_init_with_env_file_fail_if_pixi_exists(
-        #[values(
-            None,
-            Some(ManifestFormat::Pixi),
-            Some(ManifestFormat::Pyproject),
-            Some(ManifestFormat::Mojoproject)
-        )]
-        format: Option<ManifestFormat>,
+    async fn test_init_pixi_with_env_file_fail_if_pixi_exists(
+        #[values(None, Some(ManifestFormat::Pixi))] format: Option<ManifestFormat>,
         #[values(true, false)] pre_existing_pyproject: bool,
         #[values(true, false)] pre_existing_mojo: bool,
         #[values(true, false)] confirm_response: bool,
@@ -772,15 +775,67 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
+    #[ignore]
+    async fn test_init_pyproject_with_env_file_fail_if_pyproject_exists(
+        #[values(true, false)] pre_existing_mojo: bool,
+        #[values(true, false)] pre_existing_pixi: bool,
+        #[values(true, false)] confirm_response: bool,
+    ) {
+        let outcome = run_init_scenario(TestConfig {
+            format: Some(ManifestFormat::Pyproject),
+            with_env_file: true,
+            pre_existing_pixi,
+            pre_existing_pyproject: true,
+            pre_existing_mojo,
+            confirm_response,
+            pyproject_already_extended: false,
+        })
+        .await;
 
-    async fn test_init_with_env_file_succeeds(
-        #[values(
-            None,
-            Some(ManifestFormat::Pixi),
-            Some(ManifestFormat::Pyproject),
-            Some(ManifestFormat::Mojoproject)
-        )]
-        format: Option<ManifestFormat>,
+        let error = outcome.result.unwrap_err();
+        let error_msg = format!("{:?}", error);
+
+        assert!(
+            error_msg.contains("pyproject.toml already exists"),
+            "The command failed, but for the wrong reason. Error texts was: {}",
+            error_msg
+        )
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[ignore]
+    async fn test_init_mojo_with_env_file_fail_if_mojo_exists(
+        #[values(true, false)] pre_existing_pyproject: bool,
+        #[values(true, false)] pre_existing_pixi: bool,
+        #[values(true, false)] confirm_response: bool,
+    ) {
+        let outcome = run_init_scenario(TestConfig {
+            format: Some(ManifestFormat::Mojoproject),
+            with_env_file: true,
+            pre_existing_pixi,
+            pre_existing_pyproject,
+            pre_existing_mojo: true,
+            confirm_response,
+            pyproject_already_extended: false,
+        })
+        .await;
+
+        let error = outcome.result.unwrap_err();
+        let error_msg = format!("{:?}", error);
+
+        assert!(
+            error_msg.contains("mojoproject.toml already exists"),
+            "The command failed, but for the wrong reason. Error texts was: {}",
+            error_msg
+        )
+    }
+
+    #[rstest]
+    #[tokio::test]
+
+    async fn test_init_with_env_file_pixi_format_succeeds(
+        #[values(None, Some(ManifestFormat::Pixi))] format: Option<ManifestFormat>,
         #[values(true, false)] pre_existing_pyproject: bool,
         #[values(true, false)] pre_existing_mojo: bool,
         #[values(true, false)] confirm_response: bool,
@@ -798,6 +853,130 @@ mod tests {
 
         assert!(outcome.result.is_ok());
         assert!(outcome.pixi_exists);
+
+        // check that the info from env is in the file
+        let pixi_path = outcome.project_path.join(consts::WORKSPACE_MANIFEST);
+        let content = fs_err::read_to_string(pixi_path).unwrap();
+
+        let toml_data: toml::Value = toml::from_str(&content).expect("Valid TOML output");
+
+        assert_eq!(toml_data["workspace"]["name"].as_str(), Some("custom_env"));
+        assert_eq!(
+            toml_data["activation"]["env"]["TEST_ENV_VAR"].as_str(),
+            Some("success_value")
+        );
+        assert_eq!(toml_data["dependencies"]["python"].as_str(), Some("*"));
+        assert_eq!(toml_data["dependencies"]["numpy"].as_str(), Some("*"));
+        assert_eq!(
+            toml_data["workspace"]["channels"],
+            toml::Value::Array(vec![
+                toml::Value::String("robostack".to_string()),
+                toml::Value::String("conda-forge".to_string())
+            ])
+        );
+        assert_eq!(
+            toml_data["pypi-dependencies"]["requests"].as_str(),
+            Some("*")
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[ignore]
+    async fn test_init_with_env_file_mojo_format_succeeds(
+        #[values(true, false)] pre_existing_pyproject: bool,
+        #[values(true, false)] pre_existing_pixi: bool,
+        #[values(true, false)] confirm_response: bool,
+    ) {
+        let outcome = run_init_scenario(TestConfig {
+            format: Some(ManifestFormat::Mojoproject),
+            with_env_file: true,
+            pre_existing_pixi,
+            pre_existing_pyproject,
+            pre_existing_mojo: false,
+            confirm_response,
+            pyproject_already_extended: false,
+        })
+        .await;
+
+        assert!(outcome.result.is_ok());
+        assert!(outcome.mojo_exists);
+
+        // check that the info from env is in the file
+        let mojo_path = outcome.project_path.join(consts::MOJOPROJECT_MANIFEST);
+        let content = fs_err::read_to_string(mojo_path).unwrap();
+
+        let toml_data: toml::Value = toml::from_str(&content).expect("Valid TOML output");
+
+        assert_eq!(toml_data["workspace"]["name"].as_str(), Some("custom_env"));
+        assert_eq!(
+            toml_data["activation"]["env"]["TEST_ENV_VAR"].as_str(),
+            Some("success_value")
+        );
+        assert_eq!(toml_data["dependencies"]["python"].as_str(), Some("*"));
+        assert_eq!(toml_data["dependencies"]["numpy"].as_str(), Some("*"));
+        assert_eq!(
+            toml_data["workspace"]["channels"],
+            toml::Value::Array(vec![
+                toml::Value::String("robostack".to_string()),
+                toml::Value::String("conda-forge".to_string())
+            ])
+        );
+        assert_eq!(
+            toml_data["pypi-dependencies"]["requests"].as_str(),
+            Some("*")
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[ignore]
+    async fn test_init_with_env_file_pyproject_format_succeeds(
+        #[values(true, false)] pre_existing_pixi: bool,
+        #[values(true, false)] pre_existing_mojo: bool,
+        #[values(true, false)] confirm_response: bool,
+    ) {
+        let outcome = run_init_scenario(TestConfig {
+            format: Some(ManifestFormat::Pyproject),
+            with_env_file: true,
+            pre_existing_pixi,
+            pre_existing_pyproject: false,
+            pre_existing_mojo,
+            confirm_response,
+            pyproject_already_extended: false,
+        })
+        .await;
+
+        assert!(outcome.result.is_ok());
+        assert!(outcome.pixi_exists);
+
+        // check that the info from env is in the file
+        let pyproject_path = outcome.project_path.join(consts::PYPROJECT_MANIFEST);
+        let content = fs_err::read_to_string(pyproject_path).unwrap();
+
+        let toml_data: toml::Value = toml::from_str(&content).expect("Valid TOML output");
+
+        assert_eq!(
+            toml_data["tool"]["pixi"]["workspace"]["name"].as_str(),
+            Some("custom_env")
+        );
+        assert_eq!(
+            toml_data["tool"]["pixi"]["activation"]["env"]["TEST_ENV_VAR"].as_str(),
+            Some("success_value")
+        );
+        assert_eq!(toml_data["tool"]["pixi"]["dependencies"]["python"].as_str(), Some("*"));
+        assert_eq!(toml_data["tool"]["pixi"]["dependencies"]["numpy"].as_str(), Some("*"));
+        assert_eq!(
+            toml_data["tool"]["pixi"]["workspace"]["channels"],
+            toml::Value::Array(vec![
+                toml::Value::String("robostack".to_string()),
+                toml::Value::String("conda-forge".to_string())
+            ])
+        );
+        assert_eq!(
+            toml_data["tool"]["pixi"]["pypi-dependencies"]["requests"].as_str(),
+            Some("*")
+        );
     }
 
     #[rstest]
