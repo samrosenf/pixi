@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use miette::{Context, Diagnostic, IntoDiagnostic, NamedSource, SourceSpan};
+use pep508_rs::Requirement;
 use pixi_config::Config;
 use rattler_conda_types::{MatchSpec, NamedChannelOrUrl, ParseStrictness::Lenient};
 use serde::Deserialize;
@@ -153,35 +154,49 @@ fn parse_dependencies(deps: Vec<CondaEnvDep>) -> miette::Result<ParsedDependenci
     for dep in deps {
         match dep {
             CondaEnvDep::Conda(d) => {
-                let match_spec = MatchSpec::from_str(&d, Lenient)
-                    .into_diagnostic()
-                    .wrap_err(format!("Can't parse '{d}' as conda dependency"))?;
-                if let Some(channel) = &match_spec.channel {
-                    picked_up_channels.push(
-                        // named channels are given a url with default channel config in `MatchSpec::from_str`
-                        NamedChannelOrUrl::from_str(channel.base_url.as_str())
-                            .into_diagnostic()
-                            .wrap_err(format!("can't parse '{}' as channel", channel.base_url))?,
-                    );
-                }
-                conda_deps.push(match_spec);
+                parse_conde_dep(d, &mut conda_deps, &mut picked_up_channels)?;
             }
             CondaEnvDep::Pip { pip } => {
-                let pip = pip.unwrap_or_default();
-                pip_deps.extend(
-                    pip.iter()
-                        .map(|dep| {
-                            pep508_rs::Requirement::from_str(dep)
-                                .into_diagnostic()
-                                .wrap_err(format!("Can't parse '{dep}' as pypi dependency"))
-                        })
-                        .collect::<miette::Result<Vec<_>>>()?,
-                )
+                parse_pip_dep(pip, &mut pip_deps)?;
             }
         }
     }
 
     Ok((conda_deps, pip_deps, picked_up_channels))
+}
+
+fn parse_conde_dep(
+    dep: String,
+    conda_deps: &mut Vec<MatchSpec>,
+    picked_up_channels: &mut Vec<NamedChannelOrUrl>,
+) -> miette::Result<()> {
+    let match_spec = MatchSpec::from_str(&dep, Lenient)
+        .into_diagnostic()
+        .wrap_err(format!("Can't parse '{dep}' as conda dependency"))?;
+    if let Some(channel) = &match_spec.channel {
+        picked_up_channels.push(
+            // named channels are given a url with default channel config in `MatchSpec::from_str`
+            NamedChannelOrUrl::from_str(channel.base_url.as_str())
+                .into_diagnostic()
+                .wrap_err(format!("can't parse '{}' as channel", channel.base_url))?,
+        );
+    }
+    conda_deps.push(match_spec);
+    Ok(())
+}
+
+fn parse_pip_dep(pip: Option<Vec<String>>, pip_deps: &mut Vec<Requirement>) -> miette::Result<()> {
+    let pip = pip.unwrap_or_default();
+    pip_deps.extend(
+        pip.iter()
+            .map(|dep| {
+                pep508_rs::Requirement::from_str(dep)
+                    .into_diagnostic()
+                    .wrap_err(format!("Can't parse '{dep}' as pypi dependency"))
+            })
+            .collect::<miette::Result<Vec<_>>>()?,
+    );
+    Ok(())
 }
 
 fn parse_channels(channels: Vec<NamedChannelOrUrl>) -> Vec<NamedChannelOrUrl> {
