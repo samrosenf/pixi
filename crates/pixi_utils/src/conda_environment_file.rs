@@ -386,6 +386,63 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_conda_env_file_with_pip_requirements_file() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_dir = tmp_dir.path().to_path_buf();
+
+        let requirements_file_name = "requirements.txt";
+        let example_conda_env_file = format!(
+            r#"
+        name: pixi_example_project
+        channels:
+          - conda-forge
+        dependencies:
+          - pip==24.0
+          - pip:
+            - -r {file_name}
+        "#,
+            file_name = requirements_file_name
+        );
+
+        let example_requirements = r#"
+        requests==2.31.0
+        numpy>=1.26.0
+        pandas~=2.2.0
+        scipy
+        "#;
+
+        let conda_env_path = base_dir.join("environment.yml");
+        fs_err::write(&conda_env_path, example_conda_env_file).unwrap();
+
+        let requirements_path = base_dir.join(requirements_file_name);
+        fs_err::write(&requirements_path, example_requirements).unwrap();
+
+        let conda_env_file_data = CondaEnvFile::from_path(&conda_env_path).unwrap();
+        let vars = conda_env_file_data.variables();
+        let (conda_deps, pip_deps, _) =
+            parse_dependencies(conda_env_file_data.dependencies().clone()).unwrap();
+
+        assert_eq!(
+            conda_deps,
+            vec![MatchSpec::from_str("pip==24.0", Strict).unwrap(),]
+        );
+
+        assert_eq!(
+            pip_deps,
+            vec![
+                pep508_rs::Requirement::from_str("requests==2.31.0").unwrap(),
+                pep508_rs::Requirement::from_str("numpy>=1.26.0").unwrap(),
+                pep508_rs::Requirement::from_str("pandas~=2.2.0").unwrap(),
+                pep508_rs::Requirement::from_str("scipy").unwrap(),
+            ]
+        );
+
+        let empty_map = HashMap::<String, String>::new();
+
+        assert_eq!(vars, empty_map);
+    }
+
+    #[test]
     fn test_parse_conda_env_file_with_variables() {
         let example_conda_env_file = r#"
         name: pixi_example_project
