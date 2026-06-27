@@ -7296,6 +7296,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uv-configuration",
+ "uv-requirements-txt",
  "webpki-root-certs 1.0.7",
  "xxhash-rust",
 ]

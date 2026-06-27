@@ -204,7 +204,7 @@ async fn import(args: Args, format: &ImportFileFormat) -> miette::Result<()> {
             // TODO: Improve this:
             //  - Use .condarc as channel config
             let (conda_deps, pypi_deps, channels) =
-                env_file.to_manifest(workspace.workspace().config())?;
+                env_file.to_manifest(workspace.workspace().config()).await?;
             workspace.manifest().add_channels(
                 channels.iter().map(|c| PrioritizedChannel::from(c.clone())),
                 &feature_name,

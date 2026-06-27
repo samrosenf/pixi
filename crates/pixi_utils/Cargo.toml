@@ -57,6 +57,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
 uv-configuration = { workspace = true }
+uv-requirements-txt = { workspace = true }
 webpki-root-certs = { workspace = true }
 xxhash-rust = { workspace = true, features = ["xxh3"] }
 

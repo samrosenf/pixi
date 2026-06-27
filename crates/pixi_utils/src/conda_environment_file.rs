@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::{io::BufRead, path::Path, str::FromStr};
 use thiserror::Error;
+use uv_requirements_txt::{RequirementsTxt, RequirementsTxtRequirement};
 
 #[derive(Debug, Error)]
 #[error("Failed to parse '{path}' as a conda environment file")]
@@ -60,6 +61,8 @@ pub struct CondaEnvFile {
     dependencies: Vec<CondaEnvDep>,
     #[serde(default)]
     variables: HashMap<String, String>,
+    #[serde(skip)]
+    path: PathBuf,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -113,7 +116,7 @@ impl CondaEnvFile {
             s.push_str(&line);
             s.push('\n');
         }
-        let env_file: CondaEnvFile = match serde_yaml::from_str(&s) {
+        let mut env_file: CondaEnvFile = match serde_yaml::from_str(&s) {
             Ok(env_file) => env_file,
             Err(e) => {
                 let src = NamedSource::new(path.display().to_string(), s.to_string());
@@ -121,10 +124,11 @@ impl CondaEnvFile {
                 return Err(miette::Report::new(error));
             }
         };
+        env_file.path = path.to_path_buf();
         Ok(env_file)
     }
 
-    pub fn to_manifest(
+    pub async fn to_manifest(
         self: CondaEnvFile,
         config: &Config,
     ) -> miette::Result<(
@@ -134,8 +138,10 @@ impl CondaEnvFile {
     )> {
         // TODO: should we be applying `config.channel_config` for parsed channels too?
         let mut channels = parse_channels(self.channels().clone());
+
+        let parent_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
         let (conda_deps, pip_deps, extra_channels) =
-            parse_dependencies(self.dependencies().clone())?;
+            parse_dependencies(self.dependencies().clone(), parent_dir).await?;
 
         channels.extend(extra_channels);
         let mut channels: Vec<_> = channels.into_iter().unique().collect();
@@ -147,7 +153,10 @@ impl CondaEnvFile {
     }
 }
 
-fn parse_dependencies(deps: Vec<CondaEnvDep>) -> miette::Result<ParsedDependencies> {
+async fn parse_dependencies(
+    deps: Vec<CondaEnvDep>,
+    base_dir: &Path,
+) -> miette::Result<ParsedDependencies> {
     let mut conda_deps = Vec::new();
     let mut pip_deps = Vec::new();
     let mut picked_up_channels = Vec::new();
@@ -157,7 +166,7 @@ fn parse_dependencies(deps: Vec<CondaEnvDep>) -> miette::Result<ParsedDependenci
                 parse_conde_dep(d, &mut conda_deps, &mut picked_up_channels)?;
             }
             CondaEnvDep::Pip { pip } => {
-                parse_pip_dep(pip, &mut pip_deps)?;
+                parse_pip_dep(pip, base_dir, &mut pip_deps).await?;
             }
         }
     }
@@ -185,18 +194,56 @@ fn parse_conde_dep(
     Ok(())
 }
 
-fn parse_pip_dep(pip: Option<Vec<String>>, pip_deps: &mut Vec<Requirement>) -> miette::Result<()> {
+async fn parse_pip_dep(
+    pip: Option<Vec<String>>,
+    base_dir: &Path,
+    pip_deps: &mut Vec<Requirement>,
+) -> miette::Result<()> {
     let pip = pip.unwrap_or_default();
-    pip_deps.extend(
-        pip.iter()
-            .map(|dep| {
-                pep508_rs::Requirement::from_str(dep)
-                    .into_diagnostic()
-                    .wrap_err(format!("Can't parse '{dep}' as pypi dependency"))
-            })
-            .collect::<miette::Result<Vec<_>>>()?,
-    );
+    for dep in pip {
+        if let Some(filename) = extract_requirements_filename(&dep) {
+            let full_path = base_dir.join(&filename);
+            let requirements_file = RequirementsTxt::parse(&full_path, &base_dir)
+                .await
+                .into_diagnostic()?;
+            for entry in requirements_file.requirements {
+                match entry.requirement {
+                    RequirementsTxtRequirement::Named(uv_req) => {
+                        let req_str = uv_req.to_string();
+
+                        let core_requirement = pep508_rs::Requirement::from_str(&req_str)
+                            .into_diagnostic()
+                            .wrap_err_with(|| {
+                                format!("Failed to convert requirements.txt dependency {}", req_str)
+                            })?;
+
+                        pip_deps.push(core_requirement);
+                    }
+
+                    RequirementsTxtRequirement::Unnamed(_unnamed_req) => {
+                        return Err(miette::miette!(
+                            "Unnamed direct URL dependencies in requirements.txt are not currently supported by Pixi"
+                        ));
+                    }
+                }
+            }
+        } else {
+            let requirement = pep508_rs::Requirement::from_str(&dep)
+                .into_diagnostic()
+                .wrap_err(format!("Can't parse '{dep}' as pypi dependency"))?;
+            pip_deps.push(requirement);
+        }
+    }
     Ok(())
+}
+
+fn extract_requirements_filename(dep: &str) -> Option<String> {
+    for prefix in ["--requirement ", "--requirement=", "-r ", "-r"] {
+        if let Some(rest) = dep.strip_prefix(prefix) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
 }
 
 fn parse_channels(channels: Vec<NamedChannelOrUrl>) -> Vec<NamedChannelOrUrl> {
@@ -222,8 +269,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_parse_conda_env_file() {
+    #[tokio::test]
+    async fn test_parse_conda_env_file() {
         let example_conda_env_file = r#"
         name: pixi_example_project
         channels:
@@ -261,7 +308,8 @@ mod tests {
         );
 
         let config = Config::default();
-        let (conda_deps, pip_deps, channels) = conda_env_file_data.to_manifest(&config).unwrap();
+        let (conda_deps, pip_deps, channels) =
+            conda_env_file_data.to_manifest(&config).await.unwrap();
 
         assert_eq!(
             channels,
@@ -310,13 +358,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_import_from_env_yamls() {
+    #[tokio::test]
+    async fn test_import_from_env_yamls() {
         let test_files_path = Path::new(&env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("environment_yamls");
 
-        let entries = match fs_err::read_dir(test_files_path) {
+        let entries = match fs_err::read_dir(test_files_path.clone()) {
             Ok(entries) => entries,
             Err(e) => panic!("Failed to read directory: {e}"),
         };
@@ -340,7 +388,9 @@ mod tests {
             insta::assert_debug_snapshot!(
                 snapshot_name,
                 (
-                    parse_dependencies(env_info.dependencies().clone()).unwrap(),
+                    parse_dependencies(env_info.dependencies().clone(), &test_files_path)
+                        .await
+                        .unwrap(),
                     parse_channels(env_info.channels().clone()),
                     env_info.name()
                 )
@@ -348,8 +398,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parse_conda_env_file_with_explicit_pip_dep() {
+    #[tokio::test]
+    async fn test_parse_conda_env_file_with_explicit_pip_dep() {
         let example_conda_env_file = r#"
         name: pixi_example_project
         channels:
@@ -367,8 +417,11 @@ mod tests {
 
         let conda_env_file_data = CondaEnvFile::from_path(path).unwrap();
         let vars = conda_env_file_data.variables();
+        let base_dir = &conda_env_file_data.path;
         let (conda_deps, pip_deps, _) =
-            parse_dependencies(conda_env_file_data.dependencies().clone()).unwrap();
+            parse_dependencies(conda_env_file_data.dependencies().clone(), base_dir)
+                .await
+                .unwrap();
 
         assert_eq!(
             conda_deps,
@@ -385,8 +438,8 @@ mod tests {
         assert_eq!(vars, empty_map);
     }
 
-    #[test]
-    fn test_parse_conda_env_file_with_pip_requirements_file() {
+    #[tokio::test]
+    async fn test_parse_conda_env_file_with_pip_requirements_file() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let base_dir = tmp_dir.path().to_path_buf();
 
@@ -420,7 +473,9 @@ mod tests {
         let conda_env_file_data = CondaEnvFile::from_path(&conda_env_path).unwrap();
         let vars = conda_env_file_data.variables();
         let (conda_deps, pip_deps, _) =
-            parse_dependencies(conda_env_file_data.dependencies().clone()).unwrap();
+            parse_dependencies(conda_env_file_data.dependencies().clone(), &base_dir)
+                .await
+                .unwrap();
 
         assert_eq!(
             conda_deps,
