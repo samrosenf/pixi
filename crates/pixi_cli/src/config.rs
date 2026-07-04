@@ -6,6 +6,7 @@ use pixi_config::Config;
 use pixi_consts::consts;
 use pixi_core::WorkspaceLocator;
 use pixi_core::workspace::WorkspaceLocatorError;
+use pixi_manifest::toml::TomlDocument;
 use rattler_conda_types::NamedChannelOrUrl;
 use std::{io::Write, path::PathBuf, str::FromStr};
 
@@ -274,8 +275,27 @@ fn alter_config(
     value: Option<String>,
     mode: AlterMode,
 ) -> miette::Result<()> {
-    let mut config = load_config(common_args)?;
     let to = determine_config_write_path(common_args)?;
+    let content = match fs_err::read_to_string(&to) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(e)
+                .into_diagnostic()
+                .context("failed to read config file");
+        }
+    };
+
+    let doc_mut = content
+        .parse::<toml_edit::DocumentMut>()
+        .into_diagnostic()
+        .context("failed to parse TOML")?;
+
+    let mut toml_doc = TomlDocument::new(doc_mut);
+
+    let mut config = load_config(common_args)?;
+
+    let key_parts: Vec<&str> = key.split('.').collect();
 
     match mode {
         AlterMode::Prepend | AlterMode::Append => {
@@ -316,13 +336,102 @@ fn alter_config(
                     ));
                 }
             }
+
+            transplant_config_key(&config, &mut toml_doc, &key_parts)?;
         }
-        AlterMode::Set | AlterMode::Unset => config.set(key, value)?,
+        AlterMode::Set => {
+            // Run set on Config object for validation
+            config.set(key, value)?;
+
+            transplant_config_key(&config, &mut toml_doc, &key_parts)?;
+        }
+        AlterMode::Unset => unset(&mut toml_doc, &key_parts, key)?,
     }
 
-    config.save(&to)?;
+    // config.save(&to)?;
+    let contents = toml_doc.to_string();
+    fs_err::write(&to, contents).into_diagnostic()?;
     eprintln!("✅ Updated config at {}", to.display());
     Ok(())
+}
+
+fn unset(toml_doc: &mut TomlDocument, key_parts: &[&str], key: &str) -> miette::Result<()> {
+    let (parent_keys, target_key) = key_parts.split_at(key_parts.len() - 1);
+    let target_key = target_key[0];
+
+    let parent_table = toml_doc
+        .get_or_insert_nested_table(parent_keys)
+        .into_diagnostic()
+        .context("Failed to navigate to target configuration section")?;
+
+    if !parent_table.contains_key(target_key) {
+        return Err(miette::miette!(
+            "Key '{}' not found in configuration file",
+            key
+        ));
+    }
+
+    parent_table.remove(target_key);
+    Ok(())
+}
+
+fn transplant_config_key(
+    config: &Config,
+    toml_doc: &mut TomlDocument,
+    key_parts: &[&str],
+) -> miette::Result<()> {
+    let updated_config_toml = toml_edit::ser::to_string(&config)
+        .into_diagnostic()
+        .context("failed to serialize updated configuration")?;
+
+    let temp_doc = updated_config_toml
+        .parse::<toml_edit::DocumentMut>()
+        .into_diagnostic()
+        .context("failed to parse temporary configuration layout")?;
+
+    // Start at the root of the temporary document + walk down the path
+    let mut current_item: &toml_edit::Item = temp_doc.as_item();
+    for part in key_parts {
+        current_item = current_item.get(part).unwrap_or(&toml_edit::Item::None);
+    }
+
+    let (parent_keys, target_key) = key_parts.split_at(key_parts.len() - 1);
+    let target_key = target_key[0];
+
+    let parent_table = toml_doc
+        .get_or_insert_nested_table(parent_keys)
+        .into_diagnostic()
+        .context("Failed to navigate to target configuration section")?;
+
+    let mut new_item = current_item.clone();
+
+    if let Some(old_array) = parent_table.get(target_key).and_then(|i| i.as_array())
+        && let Some(new_array) = new_item.as_array_mut()
+    {
+        preserve_array_formatting(old_array, new_array);
+    }
+
+    parent_table.insert(target_key, new_item);
+    Ok(())
+}
+
+fn preserve_array_formatting(old_array: &toml_edit::Array, new_array: &mut toml_edit::Array) {
+    if old_array.trailing_comma()
+        || old_array.get(0).is_some_and(|v| {
+            v.decor()
+                .prefix()
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .contains('\n')
+        })
+    {
+        new_array.set_trailing_comma(true);
+        new_array.set_trailing("\n");
+
+        for value in new_array.iter_mut() {
+            value.decor_mut().set_prefix("\n    ");
+        }
+    }
 }
 
 // Trick to show only relevant field of the Config
@@ -458,19 +567,23 @@ mod tests {
         .await;
     }
 
-    // This should actually give an error, since the key doesn't exist - but the current logic allows it
     #[tokio::test]
     async fn unset_missing_key() {
         let test_context = TestContext::setup(None);
 
-        execute_subcommand(Subcommand::Unset(UnsetArgs {
-            key: "pinning-strategy".to_owned(),
-            common: test_context.common_args,
-        }))
-        .await;
+        let args = Args {
+            subcommand: Subcommand::Unset(UnsetArgs {
+                key: "pinning-strategy".to_owned(),
+                common: test_context.common_args,
+            }),
+        };
+        let result = execute(args).await;
+
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not found in configuration file"));
     }
 
-    #[ignore = "This should actually pass, since the key exist in the file, but the current logic is wrong"]
+    // #[ignore = "This should actually pass, since the key exist in the file, but the current logic is wrong"]
     #[tokio::test]
     async fn unset_on_existing_stale_key() {
         let test_context = TestContext::setup(Some(
@@ -486,7 +599,7 @@ mod tests {
         .await;
     }
 
-    #[ignore = "Fails because the comment isn't kept - should be fixed when using toml_edit"]
+    // #[ignore = "Fails because the comment isn't kept - should be fixed when using toml_edit"]
     #[tokio::test]
     async fn set_preserves_comments() {
         let test_context = TestContext::setup(Some(
@@ -510,14 +623,14 @@ mod tests {
         );
     }
 
-    #[ignore = "Fails because the comment & stale keys aren't kept - should be fixed when using toml_edit"]
+    // #[ignore = "Fails because the comment & stale keys aren't kept - should be fixed when using toml_edit"]
     #[tokio::test]
     async fn unset_field_config_existing_with_comment() {
         let test_context = TestContext::setup(Some(
             r#"# some comment which should be kept
-        allow-symbolic-links = true
-        stale-key = "some-value"
-        stale-key2 = "some-other-value"
+allow-symbolic-links = true
+stale-key = "some-value"
+stale-key2 = "some-other-value"
         "#,
         ));
 
@@ -529,7 +642,8 @@ mod tests {
 
         insta::assert_snapshot!(
             test_context.read_config(),
-            @r#"# some comment which should be kept
+            @r#"
+# some comment which should be kept
 stale-key = "some-value"
 stale-key2 = "some-other-value"
         "#
@@ -537,7 +651,7 @@ stale-key2 = "some-other-value"
     }
 
     #[tokio::test]
-    async fn append() {
+    async fn append_single_line() {
         let test_context = TestContext::setup(Some(
             r#"allow-symbolic-links = true
         default-channels = ["conda-forge"]
@@ -553,17 +667,45 @@ stale-key2 = "some-other-value"
 
         insta::assert_snapshot!(
             test_context.read_config(),
-            @r#"default-channels = [
-    "conda-forge",
-    "new-channel",
-]
-allow-symbolic-links = true
-"#
+            @r#"
+        allow-symbolic-links = true
+        default-channels = ["conda-forge", "new-channel"]
+        "#
         );
     }
 
     #[tokio::test]
-    async fn prepend() {
+    async fn append_multi_line() {
+        let test_context = TestContext::setup(Some(
+            r#"allow-symbolic-links = true
+default-channels = [
+    "conda-forge",
+]
+        "#,
+        ));
+
+        execute_subcommand(Subcommand::Append(PendArgs {
+            key: "default-channels".to_owned(),
+            value: "new-channel".to_owned(),
+            common: test_context.common_args.clone(),
+        }))
+        .await;
+
+        insta::assert_snapshot!(
+            test_context.read_config(),
+            @r#"
+allow-symbolic-links = true
+default-channels = [
+    "conda-forge",
+    "new-channel",
+]
+        "#
+        );
+    }
+
+
+    #[tokio::test]
+    async fn prepend_single_line() {
         let test_context = TestContext::setup(Some(
             r#"allow-symbolic-links = true
         default-channels = ["conda-forge"]
@@ -579,12 +721,39 @@ allow-symbolic-links = true
 
         insta::assert_snapshot!(
             test_context.read_config(),
-            @r#"default-channels = [
+            @r#"
+        allow-symbolic-links = true
+        default-channels = ["new-channel", "conda-forge"]
+        "#
+        );
+    }
+
+    #[tokio::test]
+    async fn prepend_multi_line() {
+        let test_context = TestContext::setup(Some(
+            r#"allow-symbolic-links = true
+default-channels = [
+    "conda-forge",
+]
+        "#,
+        ));
+
+        execute_subcommand(Subcommand::Prepend(PendArgs {
+            key: "default-channels".to_owned(),
+            value: "new-channel".to_owned(),
+            common: test_context.common_args.clone(),
+        }))
+        .await;
+
+        insta::assert_snapshot!(
+            test_context.read_config(),
+            @r#"
+allow-symbolic-links = true
+default-channels = [
     "new-channel",
     "conda-forge",
 ]
-allow-symbolic-links = true
-"#
+        "#
         );
     }
 }
