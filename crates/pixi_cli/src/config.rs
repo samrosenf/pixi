@@ -599,7 +599,6 @@ mod tests {
         .await;
     }
 
-    // #[ignore = "Fails because the comment isn't kept - should be fixed when using toml_edit"]
     #[tokio::test]
     async fn set_preserves_comments() {
         let test_context = TestContext::setup(Some(
@@ -623,11 +622,10 @@ mod tests {
         );
     }
 
-    // #[ignore = "Fails because the comment & stale keys aren't kept - should be fixed when using toml_edit"]
     #[tokio::test]
     async fn unset_field_config_existing_with_comment() {
         let test_context = TestContext::setup(Some(
-            r#"# some comment which should be kept
+            r#"# some comment that is being deleted as part of the key
 allow-symbolic-links = true
 stale-key = "some-value"
 stale-key2 = "some-other-value"
@@ -643,7 +641,6 @@ stale-key2 = "some-other-value"
         insta::assert_snapshot!(
             test_context.read_config(),
             @r#"
-# some comment which should be kept
 stale-key = "some-value"
 stale-key2 = "some-other-value"
         "#
@@ -702,7 +699,6 @@ default-channels = [
         "#
         );
     }
-
 
     #[tokio::test]
     async fn prepend_single_line() {
