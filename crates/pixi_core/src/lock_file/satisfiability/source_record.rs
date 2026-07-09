@@ -95,6 +95,30 @@ pub(super) fn verify_build_source_matches_manifest(
     }
 }
 
+/// Verify that an immutable source record's identity hash still matches the
+/// value it was locked with.
+///
+/// The lock file does not carry the inline package definition itself; its
+/// content hash is folded into the record's `identifier_hash` at solve time.
+/// Every other hash input round-trips verbatim through the lock file, so
+/// recomputing the hash with the *current* manifest's inline content hash
+/// reproduces the stored value exactly when the inline definition is
+/// unchanged (or absent on both sides). A mismatch means the inline table
+/// was edited, added, or removed - or the stored hash was produced by a
+/// different pixi version with another algorithm - and the record must be
+/// re-resolved.
+pub(super) fn verify_immutable_record_identity(
+    record: &pixi_record::UnresolvedSourceRecord,
+    current_inline_hash: Option<u64>,
+) -> Result<(), Box<PlatformUnsat>> {
+    if record.compute_identifier_hash(current_inline_hash) != record.identifier_hash {
+        return Err(Box::new(PlatformUnsat::SourcePackageIdentityChanged {
+            package: record.name().as_source().to_string(),
+        }));
+    }
+    Ok(())
+}
+
 /// Verify that the locked build/host packages of a partial / mutable
 /// source record still satisfy the build backend's declared specs for
 /// the matching output, then return a freshly-assembled full source
@@ -430,9 +454,12 @@ fn collect_direct_run_exports(
         if !direct_names.contains(name) || ignore.from_package.contains(name) {
             continue;
         }
+        // Read run-exports off both binary and (full) source records,
+        // mirroring the solve path's `extract_run_exports`; partial source
+        // records have no package record and thus contribute nothing.
         let Some(re_json) = record
-            .as_binary()
-            .and_then(|b| b.package_record.run_exports.as_ref())
+            .package_record()
+            .and_then(|pr| pr.run_exports.as_ref())
         else {
             continue;
         };
@@ -868,7 +895,7 @@ mod tests {
     use super::super::BuildOrHostEnv;
     use super::{
         build_full_source_record_from_output, variants_equivalent,
-        verify_locked_against_backend_specs,
+        verify_immutable_record_identity, verify_locked_against_backend_specs,
     };
     use pixi_build_types::{
         BinaryPackageSpec, ExtraGroupName, NamedSpec, PackageSpec, PinCompatibleSpec,
@@ -1414,6 +1441,36 @@ mod tests {
         .expect_err("expected drift");
         assert!(diff.added.is_empty());
         assert_eq!(diff.removed, vec!["a >=1".to_string()]);
+    }
+
+    /// The identifier hash of an immutable record folds in the content hash
+    /// of the inline package definition it was resolved with (or `None`).
+    /// Verification recomputes the hash with the definition currently in the
+    /// manifest, so any add / edit / removal of the inline table must
+    /// surface as unsat while an unchanged definition passes.
+    #[test]
+    fn immutable_inline_definition_change_is_detected() {
+        let record_with_inline_hash = |inline_content_hash: Option<u64>| {
+            let partial = make_partial_source_record("pkg", "./pkg", Vec::new(), Vec::new());
+            UnresolvedSourceRecord::new(
+                partial.data,
+                partial.manifest_source,
+                partial.build_source,
+                partial.variants,
+                Vec::new(),
+                Vec::new(),
+                inline_content_hash,
+            )
+        };
+
+        let with_inline = record_with_inline_hash(Some(42));
+        assert!(verify_immutable_record_identity(&with_inline, Some(42)).is_ok());
+        assert!(verify_immutable_record_identity(&with_inline, Some(43)).is_err());
+        assert!(verify_immutable_record_identity(&with_inline, None).is_err());
+
+        let without_inline = record_with_inline_hash(None);
+        assert!(verify_immutable_record_identity(&without_inline, None).is_ok());
+        assert!(verify_immutable_record_identity(&without_inline, Some(42)).is_err());
     }
 
     /// Build a Full source record with the supplied `depends` and

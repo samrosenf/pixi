@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### [0.72.2] - 2026-07-09
+#### ✨ Highlights
+
+This release contains more fixes for rich platforms.
+
+
+#### Added
+
+- Add `pixi workspace platform add --auto-detected` by @hunger in [#6355](https://github.com/prefix-dev/pixi/pull/6355)
+- Explain why each declared platform cannot run here by @hunger in [#6491](https://github.com/prefix-dev/pixi/pull/6491)
+
+
+#### Changed
+
+- Compose sysreq platforms from customisations only by @kilian-hu in [#6520](https://github.com/prefix-dev/pixi/pull/6520)
+- Report unsatisfied virtual packages instead of a misleading interpreter error by @hunger 
+
+
+#### Documentation
+
+- Document the build variants pixi sets automatically by @hunger in [#6534](https://github.com/prefix-dev/pixi/pull/6534)
+
+
+#### Fixed
+
+- Quick-validate to rebuild source packages on rich platforms by @wolfv in [#6544](https://github.com/prefix-dev/pixi/pull/6544)
+- Satisfiability of conditional dependencies with virtual packages by @ruben-arts in [#6554](https://github.com/prefix-dev/pixi/pull/6554)
+- Name the unmet virtual package in the runs-by-accident warning by @hunger in [#6563](https://github.com/prefix-dev/pixi/pull/6563)
+- Truncate stdlib variant version to major.minor by @hunger in [#6567](https://github.com/prefix-dev/pixi/pull/6567)
+
+
+#### Removed
+
+- Remove outdated `click` pin by @lucascolley in [#6549](https://github.com/prefix-dev/pixi/pull/6549)
+
+
+
+### [0.72.1] - 2026-07-07
+#### ✨ Highlights
+
+This release contains important bugfixes for rich platforms, v3 repodata handling, pixi-build-r and more.
+
+#### Changed
+
+- Do not fail when running tasks in an environment by @hunger in [#6507](https://github.com/prefix-dev/pixi/pull/6507)
+- Provide R packages under their r-prefixed conda name by @roaldarbol in [#6515](https://github.com/prefix-dev/pixi/pull/6515)
+- Suggest `pixi self-update --version` for requires-pixi errors by @hunger in [#6516](https://github.com/prefix-dev/pixi/pull/6516)
+- Register run-export-introduced source deps on the assembled record by @wolfv in [#6519](https://github.com/prefix-dev/pixi/pull/6519)
+- Let explicit source registrations win over implied ones by @Hofer-Julian in [#6532](https://github.com/prefix-dev/pixi/pull/6532)
+
+
+#### Documentation
+
+- Document all override variables by @Hofer-Julian in [#6486](https://github.com/prefix-dev/pixi/pull/6486)
+- Fix `requires-python` field by @mwtoews in [#6512](https://github.com/prefix-dev/pixi/pull/6512)
+
+
+#### Fixed
+
+- Don't drag rich platform variants into bare-subdir environments by @hunger in [#6517](https://github.com/prefix-dev/pixi/pull/6517)
+- Invalidate lock file when an inline package definition changes by @Hofer-Julian in [#6529](https://github.com/prefix-dev/pixi/pull/6529)
+
+
+#### Refactor
+
+- Use shared config types from rattler_config by @wolfv in [#6528](https://github.com/prefix-dev/pixi/pull/6528)
+
+
+#### New Contributors
+* @mwtoews made their first contribution in [#6512](https://github.com/prefix-dev/pixi/pull/6512)
+* @roaldarbol made their first contribution in [#6515](https://github.com/prefix-dev/pixi/pull/6515)
+
 ### [0.72.0] - 2026-07-01
 #### ✨ Highlights
 
