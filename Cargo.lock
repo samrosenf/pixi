@@ -7429,7 +7429,6 @@ dependencies = [
  "dunce",
  "fs-err",
  "hex",
- "jiff",
  "miette 7.6.0",
  "pathdiff",
  "pep440_rs",
